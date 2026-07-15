@@ -44,6 +44,16 @@ test("atomic flows lock rows and guard one-time rewards", () => {
   assert.doesNotMatch(sql, /task_date\s*=\s*current_date/i);
 });
 
+test("task penalties are bounded, idempotent, and recorded", () => {
+  assert.match(sql, /star_penalty integer not null default 0/i);
+  assert.match(sql, /function public\.penalize_task[\s\S]*?for update;/i);
+  assert.match(sql, /if v_task\.penalty_applied then return v_task/i);
+  assert.match(sql, /least\(v_task\.star_penalty, v_balance\)/i);
+  assert.match(sql, /'任务未完成扣除'/i);
+  assert.match(app, /未完成扣除星星/);
+  assert.match(app, /确认记录并扣星/);
+});
+
 test("mobile layout uses bottom navigation and blocks horizontal overflow", () => {
   assert.match(css, /@media\s*\(max-width:\s*760px\)/i);
   assert.match(css, /overflow-x:\s*hidden/i);

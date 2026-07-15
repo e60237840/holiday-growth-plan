@@ -107,11 +107,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 14px; margin-top: 9px; color: #7a817d; font-size: 10px; }
 .task-meta span { display: inline-flex; align-items: center; gap: 4px; }
 .task-meta .reward-meta { color: #a36e1d; }
+.task-meta .penalty-meta { color: var(--red); }
 .task-meta .game-meta { color: var(--blue); }
 .required-tag { border-radius: 4px; background: var(--red-soft); padding: 2px 5px; color: var(--red); font-size: 9px; font-weight: 700; }
 .task-actions { display: flex; align-items: center; gap: 7px; }
 .done-mark { display: flex; align-items: center; gap: 5px; color: var(--green); font-size: 11px; font-weight: 700; }
 .waiting-copy { color: #a26a20; font-size: 11px; }
+.penalty-note { color: #9d4b45 !important; font-size: 11px !important; }
+.penalty-button { border-color: #e7c7c4; color: var(--red); background: #fff8f7; }
+.penalty-mark { color: var(--red); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .status-badge { flex: 0 0 auto; border-radius: 999px; background: #f0eee9; padding: 4px 7px; color: #6e7671; font-size: 9px; white-space: nowrap; }
 .status-badge.success { background: var(--green-soft); color: var(--green-dark); }
 .status-badge.warning { background: var(--gold-soft); color: #956018; }

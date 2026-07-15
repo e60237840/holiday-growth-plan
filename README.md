@@ -7,6 +7,7 @@
 - 邮箱注册与登录，所有数据按登录用户隔离
 - 今日任务、创建/修改/删除/复制/顺延、重复任务
 - 孩子提交、家长确认、星星与游戏时间一次性发放
+- 任务可设置未完成扣星；家长填写原因后确认，最多扣到 0 且只执行一次
 - 奖励管理、兑换申请、批准/拒绝、兑现记录
 - 完整星星流水，余额不能为负数
 - 游戏倒计时、暂停、结束和家长调整；刷新后继续
@@ -20,6 +21,10 @@
 2. 打开 **SQL Editor**，完整执行 [`supabase/schema.sql`](supabase/schema.sql)。
 3. 复制 `.env.example` 为 `.env.local`。
 4. 填写 Project URL 和 Publishable Key。
+
+若数据库已经执行过旧版脚本，只需在 SQL Editor 中执行
+[`supabase/migration-add-task-penalties.sql`](supabase/migration-add-task-penalties.sql)，
+即可保留原有任务和记录并增加任务惩罚功能。
 
 Publishable Key 会被前端使用，它不是服务端密钥。真正的数据安全由 SQL 中的 RLS、用户隔离策略和数据库事务函数保证。不要在本项目中使用 `service_role` 密钥。
 

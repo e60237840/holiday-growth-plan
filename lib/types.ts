@@ -31,6 +31,7 @@ export interface GrowthTask {
   start_time: string | null;
   duration_minutes: number;
   star_reward: number;
+  star_penalty: number;
   game_minutes_reward: number;
   repeat_type: RepeatType;
   weekdays: number[];
@@ -41,6 +42,8 @@ export interface GrowthTask {
   completed_at: string | null;
   approved_at: string | null;
   reward_granted: boolean;
+  penalty_applied: boolean;
+  penalized_at: string | null;
   parent_note: string | null;
   created_at?: string;
 }

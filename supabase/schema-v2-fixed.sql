@@ -1,4 +1,4 @@
--- VERSION: 2026-07-14-pgcrypto-v2
+-- VERSION: 2026-07-15-task-penalties-v3
 -- 假期成长计划：Supabase 全量初始化脚本
 -- 在一个全新的 Supabase 项目的 SQL Editor 中完整执行一次。
 
@@ -42,6 +42,7 @@ create table if not exists public.tasks (
   start_time time,
   duration_minutes integer not null default 30 check (duration_minutes between 1 and 480),
   star_reward integer not null default 0 check (star_reward between 0 and 999),
+  star_penalty integer not null default 0 check (star_penalty between 0 and 999),
   game_minutes_reward integer not null default 0 check (game_minutes_reward between 0 and 300),
   repeat_type text not null default '不重复' check (repeat_type in ('不重复','每天','周一至周五','每周指定日期')),
   weekdays smallint[] not null default '{}',
@@ -52,10 +53,17 @@ create table if not exists public.tasks (
   completed_at timestamptz,
   approved_at timestamptz,
   reward_granted boolean not null default false,
+  penalty_applied boolean not null default false,
+  penalized_at timestamptz,
   parent_note text check (char_length(parent_note) <= 300),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- 兼容旧版任务数据；已有任务默认不设置惩罚，也不会被追溯扣星。
+alter table public.tasks add column if not exists star_penalty integer not null default 0 check (star_penalty between 0 and 999);
+alter table public.tasks add column if not exists penalty_applied boolean not null default false;
+alter table public.tasks add column if not exists penalized_at timestamptz;
 
 create table if not exists public.point_transactions (
   id uuid primary key default gen_random_uuid(),
@@ -64,11 +72,16 @@ create table if not exists public.point_transactions (
   reward_redemption_id uuid,
   amount integer not null,
   reason text not null check (char_length(reason) between 1 and 200),
-  transaction_type text not null check (transaction_type in ('完成任务奖励','连续打卡奖励','家长手动奖励','家长扣除','奖励兑换','数据修正')),
+  transaction_type text not null check (transaction_type in ('完成任务奖励','任务未完成扣除','连续打卡奖励','家长手动奖励','家长扣除','奖励兑换','数据修正')),
   operator text not null default '系统' check (operator in ('孩子','家长','系统')),
   balance_after integer not null check (balance_after >= 0),
   created_at timestamptz not null default now()
 );
+
+-- 兼容旧表的积分类型约束。
+alter table public.point_transactions drop constraint if exists point_transactions_transaction_type_check;
+alter table public.point_transactions add constraint point_transactions_transaction_type_check
+  check (transaction_type in ('完成任务奖励','任务未完成扣除','连续打卡奖励','家长手动奖励','家长扣除','奖励兑换','数据修正'));
 
 create table if not exists public.rewards (
   id uuid primary key default gen_random_uuid(),
@@ -350,6 +363,57 @@ begin
   where id = p_task_id and user_id = auth.uid() and status = '待家长确认'
   returning * into v_task;
   if not found then raise exception 'task not found or not pending'; end if;
+  return v_task;
+end;
+$$;
+
+create or replace function public.penalize_task(p_task_id uuid, p_result text, p_reason text)
+returns public.tasks
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_user uuid := auth.uid();
+  v_task public.tasks;
+  v_balance integer;
+  v_deduction integer;
+  v_reason text;
+begin
+  if v_user is null then raise exception 'not authenticated'; end if;
+  if p_result not in ('未完成', '未达标') then raise exception 'invalid task result'; end if;
+  if char_length(trim(coalesce(p_reason, ''))) < 2 then raise exception 'reason required'; end if;
+
+  select * into v_task
+  from public.tasks
+  where id = p_task_id and user_id = v_user
+  for update;
+  if not found then raise exception 'task not found'; end if;
+  if v_task.reward_granted or v_task.status = '已完成' then raise exception 'completed task cannot be penalized'; end if;
+  if v_task.penalty_applied then return v_task; end if;
+
+  select stars_balance into v_balance
+  from public.profiles
+  where user_id = v_user
+  for update;
+
+  v_deduction := least(v_task.star_penalty, v_balance);
+  v_balance := v_balance - v_deduction;
+  v_reason := left(p_result || '：' || trim(p_reason), 200);
+
+  if v_deduction > 0 then
+    update public.profiles set stars_balance = v_balance where user_id = v_user;
+    insert into public.point_transactions (user_id, task_id, amount, reason, transaction_type, operator, balance_after)
+    values (v_user, v_task.id, -v_deduction, v_reason, '任务未完成扣除', '家长', v_balance);
+  end if;
+
+  update public.tasks
+  set status = '未完成',
+      parent_note = left(trim(p_reason), 300),
+      penalty_applied = true,
+      penalized_at = now()
+  where id = v_task.id
+  returning * into v_task;
   return v_task;
 end;
 $$;
@@ -670,7 +734,7 @@ grant update (child_name, avatar_url, holiday_start, holiday_end, timezone, base
 
 revoke all on public.tasks from anon, authenticated;
 grant select, insert, update, delete on public.tasks to authenticated;
-revoke update (user_id, reward_granted, completed_at, approved_at) on public.tasks from authenticated;
+revoke update (user_id, reward_granted, penalty_applied, completed_at, approved_at, penalized_at) on public.tasks from authenticated;
 
 revoke all on public.point_transactions from anon, authenticated;
 grant select on public.point_transactions to authenticated;
@@ -692,6 +756,7 @@ revoke execute on function public.family_today() from public, anon;
 revoke execute on function public.submit_task_completion(uuid) from public, anon;
 revoke execute on function public.approve_task(uuid) from public, anon;
 revoke execute on function public.reject_task_completion(uuid, text) from public, anon;
+revoke execute on function public.penalize_task(uuid, text, text) from public, anon;
 revoke execute on function public.adjust_points(integer, text) from public, anon;
 revoke execute on function public.request_reward_redemption(uuid) from public, anon;
 revoke execute on function public.review_reward_redemption(uuid, text, text) from public, anon;
@@ -709,6 +774,7 @@ grant execute on function public.ensure_today_game_record() to authenticated;
 grant execute on function public.submit_task_completion(uuid) to authenticated;
 grant execute on function public.approve_task(uuid) to authenticated;
 grant execute on function public.reject_task_completion(uuid, text) to authenticated;
+grant execute on function public.penalize_task(uuid, text, text) to authenticated;
 grant execute on function public.adjust_points(integer, text) to authenticated;
 grant execute on function public.request_reward_redemption(uuid) to authenticated;
 grant execute on function public.review_reward_redemption(uuid, text, text) to authenticated;
@@ -743,4 +809,3 @@ do $$ begin alter publication supabase_realtime add table public.rewards; except
 do $$ begin alter publication supabase_realtime add table public.reward_redemptions; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table public.game_time_records; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table public.daily_reviews; exception when duplicate_object then null; end $$;
-
