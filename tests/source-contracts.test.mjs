@@ -67,6 +67,18 @@ test("parent approval can award a bounded custom amount exactly once", () => {
   assert.match(app, /p_awarded_stars: requestedStars/);
 });
 
+test("approved game rewards add their snapshotted minutes exactly once", () => {
+  assert.match(sql, /create table if not exists public\.rewards[\s\S]*?game_minutes_reward integer not null default 0/i);
+  assert.match(sql, /create table if not exists public\.reward_redemptions[\s\S]*?game_minutes_reward integer not null default 0/i);
+  assert.match(sql, /insert into public\.reward_redemptions \(user_id, reward_id, cost, game_minutes_reward\)/i);
+  assert.match(sql, /function public\.review_reward_redemption[\s\S]*?manual_adjustment = manual_adjustment \+ v_game_minutes/i);
+  assert.match(sql, /game_transactions_redemption_once_idx[\s\S]*?reward_redemption_id is not null/i);
+  assert.match(sql, /'奖励兑换', '家长', v_available/i);
+  assert.match(app, /自动增加游戏时间（分钟）/);
+  assert.match(app, /兑换／临时/);
+  assert.match(app, /game_minutes_reward: reward\.game_minutes_reward/);
+});
+
 test("mobile layout uses bottom navigation and blocks horizontal overflow", () => {
   assert.match(css, /@media\s*\(max-width:\s*760px\)/i);
   assert.match(css, /overflow-x:\s*hidden/i);

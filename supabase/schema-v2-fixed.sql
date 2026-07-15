@@ -95,6 +95,7 @@ create table if not exists public.rewards (
   icon text not null default '🎁' check (char_length(icon) <= 8),
   is_active boolean not null default true,
   stock integer check (stock is null or stock >= 0),
+  game_minutes_reward integer not null default 0 check (game_minutes_reward between 0 and 600),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -104,12 +105,23 @@ create table if not exists public.reward_redemptions (
   user_id uuid not null references auth.users(id) on delete cascade,
   reward_id uuid not null references public.rewards(id) on delete restrict,
   cost integer not null check (cost > 0),
+  game_minutes_reward integer not null default 0 check (game_minutes_reward between 0 and 600),
   status text not null default '待审核' check (status in ('待审核','已批准','已拒绝','待兑现','已完成')),
   requested_at timestamptz not null default now(),
   approved_at timestamptz,
   fulfilled_at timestamptz,
   parent_note text check (char_length(parent_note) <= 300)
 );
+
+-- 兼容旧版奖励和兑换记录；旧奖励默认不自动增加游戏时间。
+alter table public.rewards add column if not exists game_minutes_reward integer not null default 0;
+alter table public.reward_redemptions add column if not exists game_minutes_reward integer not null default 0;
+alter table public.rewards drop constraint if exists rewards_game_minutes_reward_check;
+alter table public.rewards add constraint rewards_game_minutes_reward_check
+  check (game_minutes_reward between 0 and 600);
+alter table public.reward_redemptions drop constraint if exists reward_redemptions_game_minutes_reward_check;
+alter table public.reward_redemptions add constraint reward_redemptions_game_minutes_reward_check
+  check (game_minutes_reward between 0 and 600);
 
 alter table public.point_transactions
   drop constraint if exists point_transactions_reward_redemption_id_fkey;
@@ -135,14 +147,25 @@ create table if not exists public.game_time_transactions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   task_id uuid references public.tasks(id) on delete set null,
+  reward_redemption_id uuid references public.reward_redemptions(id) on delete set null,
   record_date date not null default current_date,
   minutes integer not null,
   reason text not null check (char_length(reason) between 1 and 200),
-  transaction_type text not null check (transaction_type in ('任务奖励','家长调整','数据修正')),
+  transaction_type text not null check (transaction_type in ('任务奖励','奖励兑换','家长调整','数据修正')),
   operator text not null default '系统' check (operator in ('孩子','家长','系统')),
   available_minutes_after integer not null,
   created_at timestamptz not null default now()
 );
+
+alter table public.game_time_transactions add column if not exists reward_redemption_id uuid;
+alter table public.game_time_transactions
+  drop constraint if exists game_time_transactions_reward_redemption_id_fkey;
+alter table public.game_time_transactions
+  add constraint game_time_transactions_reward_redemption_id_fkey
+  foreign key (reward_redemption_id) references public.reward_redemptions(id) on delete set null;
+alter table public.game_time_transactions drop constraint if exists game_time_transactions_transaction_type_check;
+alter table public.game_time_transactions add constraint game_time_transactions_transaction_type_check
+  check (transaction_type in ('任务奖励','奖励兑换','家长调整','数据修正'));
 
 create table if not exists public.daily_reviews (
   id uuid primary key default gen_random_uuid(),
@@ -167,6 +190,7 @@ create index if not exists rewards_user_active_idx on public.rewards (user_id, i
 create index if not exists redemptions_user_status_idx on public.reward_redemptions (user_id, status, requested_at desc);
 create index if not exists game_records_user_date_idx on public.game_time_records (user_id, record_date desc);
 create index if not exists game_transactions_user_created_idx on public.game_time_transactions (user_id, created_at desc);
+create unique index if not exists game_transactions_redemption_once_idx on public.game_time_transactions (reward_redemption_id) where reward_redemption_id is not null;
 create index if not exists reviews_user_date_idx on public.daily_reviews (user_id, review_date desc);
 
 create or replace function public.set_updated_at()
@@ -486,8 +510,8 @@ begin
   if v_reward.stock = 0 then raise exception 'reward out of stock'; end if;
   select stars_balance into v_balance from public.profiles where user_id = v_user;
   if v_balance < v_reward.cost then raise exception 'not enough points'; end if;
-  insert into public.reward_redemptions (user_id, reward_id, cost)
-  values (v_user, v_reward.id, v_reward.cost) returning * into v_redemption;
+  insert into public.reward_redemptions (user_id, reward_id, cost, game_minutes_reward)
+  values (v_user, v_reward.id, v_reward.cost, v_reward.game_minutes_reward) returning * into v_redemption;
   return v_redemption;
 end;
 $$;
@@ -498,8 +522,17 @@ language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
-declare v_user uuid := auth.uid(); v_redemption public.reward_redemptions; v_balance integer; v_stock integer;
+declare
+  v_user uuid := auth.uid();
+  v_redemption public.reward_redemptions;
+  v_profile public.profiles;
+  v_reward public.rewards;
+  v_record public.game_time_records;
+  v_balance integer;
+  v_game_minutes integer;
+  v_available integer;
 begin
+  if v_user is null then raise exception 'not authenticated'; end if;
   if p_decision not in ('approve','reject') then raise exception 'invalid decision'; end if;
   select * into v_redemption from public.reward_redemptions where id = p_redemption_id and user_id = v_user for update;
   if not found or v_redemption.status <> '待审核' then raise exception 'redemption is not pending'; end if;
@@ -508,18 +541,37 @@ begin
     where id = v_redemption.id returning * into v_redemption;
     return v_redemption;
   end if;
-  select stars_balance into v_balance from public.profiles where user_id = v_user for update;
+  select * into v_profile from public.profiles where user_id = v_user for update;
+  if not found then raise exception 'profile not found'; end if;
+  v_balance := v_profile.stars_balance;
   if v_balance < v_redemption.cost then raise exception 'not enough points'; end if;
-  select stock into v_stock from public.rewards where id = v_redemption.reward_id and user_id = v_user for update;
-  if v_stock = 0 then raise exception 'reward out of stock'; end if;
+  select * into v_reward from public.rewards where id = v_redemption.reward_id and user_id = v_user for update;
+  if not found then raise exception 'reward not found'; end if;
+  if v_reward.stock = 0 then raise exception 'reward out of stock'; end if;
+  v_game_minutes := v_redemption.game_minutes_reward;
   v_balance := v_balance - v_redemption.cost;
   update public.profiles set stars_balance = v_balance where user_id = v_user;
-  if v_stock is not null then update public.rewards set stock = stock - 1 where id = v_redemption.reward_id; end if;
-  update public.reward_redemptions set status = '待兑现', approved_at = now(), parent_note = left(coalesce(p_note, ''), 300)
+  if v_reward.stock is not null then update public.rewards set stock = stock - 1 where id = v_redemption.reward_id; end if;
+  update public.reward_redemptions set status = '待兑现', approved_at = now(), parent_note = left(coalesce(p_note, ''), 300), game_minutes_reward = v_game_minutes
   where id = v_redemption.id returning * into v_redemption;
   insert into public.point_transactions (user_id, reward_redemption_id, amount, reason, transaction_type, operator, balance_after)
-  select v_user, v_redemption.id, -v_redemption.cost, '兑换：' || r.title, '奖励兑换', '家长', v_balance
-  from public.rewards r where r.id = v_redemption.reward_id;
+  values (v_user, v_redemption.id, -v_redemption.cost, '兑换：' || v_reward.title, '奖励兑换', '家长', v_balance);
+  if v_game_minutes > 0 then
+    perform public.ensure_today_game_record();
+    select * into v_record from public.game_time_records
+    where user_id = v_user and record_date = public.family_today() for update;
+    update public.game_time_records
+    set manual_adjustment = manual_adjustment + v_game_minutes
+    where id = v_record.id returning * into v_record;
+    v_available := greatest(
+      least(v_profile.max_game_minutes, v_record.base_minutes + v_record.earned_minutes) + v_record.manual_adjustment,
+      0
+    );
+    insert into public.game_time_transactions
+      (user_id, reward_redemption_id, record_date, minutes, reason, transaction_type, operator, available_minutes_after)
+    values
+      (v_user, v_redemption.id, public.family_today(), v_game_minutes, left('兑换奖励：' || v_reward.title, 200), '奖励兑换', '家长', v_available);
+  end if;
   return v_redemption;
 end;
 $$;

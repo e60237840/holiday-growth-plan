@@ -35,9 +35,9 @@ export function createDemoData(): AppData {
       { id: "p1", user_id: "demo-user", task_id: "t1", amount: 8, reason: "完成数学练习", transaction_type: "完成任务奖励", operator: "家长", balance_after: 126, created_at: new Date().toISOString() },
     ],
     rewards: [
-      { id: "r1", user_id: "demo-user", title: "周末电影之夜", description: "全家一起选一部电影", cost: 45, category: "亲子活动", icon: "🎬", is_active: true, stock: null },
-      { id: "r2", user_id: "demo-user", title: "自选甜点", description: "选择一份喜欢的甜点", cost: 30, category: "食物", icon: "🍰", is_active: true, stock: 3 },
-      { id: "r3", user_id: "demo-user", title: "额外游戏 30 分钟", description: "当日使用，不能跨天", cost: 35, category: "游戏", icon: "🎮", is_active: true, stock: null },
+      { id: "r1", user_id: "demo-user", title: "周末电影之夜", description: "全家一起选一部电影", cost: 45, category: "亲子活动", icon: "🎬", is_active: true, stock: null, game_minutes_reward: 0 },
+      { id: "r2", user_id: "demo-user", title: "自选甜点", description: "选择一份喜欢的甜点", cost: 30, category: "食物", icon: "🍰", is_active: true, stock: 3, game_minutes_reward: 0 },
+      { id: "r3", user_id: "demo-user", title: "额外游戏 30 分钟", description: "家长批准后自动加入今日游戏时间", cost: 35, category: "游戏", icon: "🎮", is_active: true, stock: null, game_minutes_reward: 30 },
     ],
     redemptions: [],
     game: { id: "g1", user_id: "demo-user", record_date: today, base_minutes: 30, earned_minutes: 15, manual_adjustment: 0, used_seconds: 0, timer_started_at: null, timer_status: "未开始" },

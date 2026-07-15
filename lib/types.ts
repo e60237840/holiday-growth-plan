@@ -72,6 +72,7 @@ export interface Reward {
   icon: string;
   is_active: boolean;
   stock: number | null;
+  game_minutes_reward: number;
   created_at?: string;
 }
 
@@ -80,6 +81,7 @@ export interface Redemption {
   user_id: string;
   reward_id: string;
   cost: number;
+  game_minutes_reward: number;
   status: "待审核" | "已批准" | "已拒绝" | "待兑现" | "已完成";
   requested_at: string;
   approved_at: string | null;

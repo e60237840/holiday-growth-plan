@@ -488,16 +488,22 @@ export default function HolidayGrowthApp() {
   }
 
   async function saveReward(payload: Partial<Reward>, editing: Reward | null) {
+    const cleanPayload = {
+      ...payload,
+      game_minutes_reward: payload.category === "游戏"
+        ? Math.max(0, Math.min(600, Math.floor(Number(payload.game_minutes_reward ?? 0))))
+        : 0,
+    };
     if (!isSupabaseConfigured || !supabase) {
-      const next: Reward = { id: editing?.id ?? makeId(), user_id: "demo-user", title: payload.title!, description: payload.description ?? "", cost: Number(payload.cost), category: payload.category ?? "其他", icon: payload.icon ?? "🎁", is_active: payload.is_active ?? true, stock: payload.stock ?? null };
+      const next: Reward = { id: editing?.id ?? makeId(), user_id: "demo-user", title: cleanPayload.title!, description: cleanPayload.description ?? "", cost: Number(cleanPayload.cost), category: cleanPayload.category ?? "其他", icon: cleanPayload.icon ?? "🎁", is_active: cleanPayload.is_active ?? true, stock: cleanPayload.stock ?? null, game_minutes_reward: cleanPayload.game_minutes_reward };
       updateDemo((current) => ({ ...current, rewards: editing ? current.rewards.map((item) => item.id === editing.id ? next : item) : [next, ...current.rewards] }), editing ? "奖励已更新" : "奖励已创建");
       setModal(null);
       return;
     }
     const client = configuredSupabase();
     const query = editing
-      ? client.from("rewards").update(payload).eq("id", editing.id)
-      : client.from("rewards").insert({ ...payload, user_id: sessionUserId });
+      ? client.from("rewards").update(cleanPayload).eq("id", editing.id)
+      : client.from("rewards").insert({ ...cleanPayload, user_id: sessionUserId });
     if (await runRemote(() => query, editing ? "奖励已更新" : "奖励已创建")) setModal(null);
   }
 
@@ -514,7 +520,7 @@ export default function HolidayGrowthApp() {
   async function requestReward(reward: Reward) {
     if (!data || data.profile.stars_balance < reward.cost) return notify("星星还不够，再完成几个任务吧");
     if (!isSupabaseConfigured || !supabase) {
-      const redemption: Redemption = { id: makeId(), user_id: "demo-user", reward_id: reward.id, cost: reward.cost, status: "待审核", requested_at: new Date().toISOString(), approved_at: null, fulfilled_at: null, parent_note: null };
+      const redemption: Redemption = { id: makeId(), user_id: "demo-user", reward_id: reward.id, cost: reward.cost, game_minutes_reward: reward.game_minutes_reward, status: "待审核", requested_at: new Date().toISOString(), approved_at: null, fulfilled_at: null, parent_note: null };
       updateDemo((current) => ({ ...current, redemptions: [redemption, ...current.redemptions] }), "兑换申请已提交");
       return;
     }
@@ -525,23 +531,28 @@ export default function HolidayGrowthApp() {
     if (!isSupabaseConfigured || !supabase) {
       if (decision === "approve" && data && data.profile.stars_balance < redemption.cost) return notify("当前星星不足，不能批准");
       updateDemo((current) => {
-        const balance = current.profile.stars_balance - redemption.cost;
+        const pending = current.redemptions.find((item) => item.id === redemption.id);
+        if (!pending || pending.status !== "待审核") return current;
         const reward = current.rewards.find((item) => item.id === redemption.reward_id);
+        const balance = current.profile.stars_balance - redemption.cost;
+        const gameMinutes = redemption.game_minutes_reward;
         return {
           ...current,
           profile: decision === "approve" ? { ...current.profile, stars_balance: balance } : current.profile,
+          game: decision === "approve" && gameMinutes > 0 ? { ...current.game, manual_adjustment: current.game.manual_adjustment + gameMinutes } : current.game,
           rewards: decision === "approve"
             ? current.rewards.map((item) => item.id === redemption.reward_id && item.stock !== null ? { ...item, stock: Math.max(0, item.stock - 1) } : item)
             : current.rewards,
-          redemptions: current.redemptions.map((item) => item.id === redemption.id ? { ...item, status: decision === "approve" ? "待兑现" : "已拒绝", approved_at: decision === "approve" ? new Date().toISOString() : null } : item),
+          redemptions: current.redemptions.map((item) => item.id === redemption.id ? { ...item, game_minutes_reward: gameMinutes, status: decision === "approve" ? "待兑现" : "已拒绝", approved_at: decision === "approve" ? new Date().toISOString() : null } : item),
           points: decision === "approve"
             ? [{ id: makeId(), user_id: "demo-user", task_id: null, amount: -redemption.cost, reason: `兑换奖励：${reward?.title ?? "奖励"}`, transaction_type: "奖励兑换", operator: "家长", balance_after: balance, created_at: new Date().toISOString() }, ...current.points]
             : current.points,
         };
-      }, decision === "approve" ? "兑换已批准，星星已扣除" : "兑换已拒绝，不会扣除星星");
+      }, decision === "approve" ? (redemption.game_minutes_reward > 0 ? `兑换已批准，已增加 ${redemption.game_minutes_reward} 分钟` : "兑换已批准，星星已扣除") : "兑换已拒绝，不会扣除星星");
       return;
     }
-    await runRemote(() => configuredSupabase().rpc("review_reward_redemption", { p_redemption_id: redemption.id, p_decision: decision, p_note: null }), decision === "approve" ? "兑换已批准，星星已扣除" : "兑换已拒绝，不会扣除星星");
+    const gameMinutes = redemption.game_minutes_reward;
+    await runRemote(() => configuredSupabase().rpc("review_reward_redemption", { p_redemption_id: redemption.id, p_decision: decision, p_note: null }), decision === "approve" ? (gameMinutes > 0 ? `兑换已批准，已增加 ${gameMinutes} 分钟游戏时间` : "兑换已批准，星星已扣除") : "兑换已拒绝，不会扣除星星");
   }
 
   async function fulfillRedemption(redemption: Redemption) {
@@ -874,7 +885,7 @@ function GameCard({ profile, game, tasks, mode, onGameAction, onAdjustGame }: {
   const now = useLiveNow(game.timer_status === "计时中");
   const remainingSeconds = getRemainingGameSeconds(profile, game, now);
   const requiredTasksIncomplete = profile.require_tasks_before_game && tasks.some((task) => task.is_required && task.status !== "已完成");
-  return <section className="card game-card"><div className="game-top"><div className="game-icon"><Gamepad2 /></div><div><p className="eyebrow">游戏时间管理</p><h2>{game.timer_status === "计时中" ? "正在游戏" : "今日可用时间"}</h2></div><StatusBadge status={game.timer_status} /></div><div className="timer-display"><strong>{formatClock(remainingSeconds)}</strong><span>剩余时间</span></div><div className="game-breakdown"><span>基础 <b>{game.base_minutes} 分钟</b></span><span>任务奖励 <b>+{game.earned_minutes} 分钟</b></span><span>已使用 <b>{Math.floor((getGameAvailableMinutes(profile, game) * 60 - remainingSeconds) / 60)} 分钟</b></span></div>{requiredTasksIncomplete && <p className="game-lock-note">完成今天的必做任务后，就可以开始游戏。</p>}<div className="game-actions">{game.timer_status === "计时中" ? <button className="secondary-button" onClick={() => onGameAction("pause")}><CirclePause size={18} />暂停计时</button> : <button className="primary-button" disabled={remainingSeconds <= 0 || requiredTasksIncomplete} onClick={() => onGameAction("start")}><CirclePlay size={18} />{requiredTasksIncomplete ? "先完成必做任务" : "开始游戏"}</button>}<button className="secondary-button" disabled={game.timer_status !== "计时中" && game.timer_status !== "已暂停"} onClick={() => onGameAction("stop")}><Check size={18} />结束游戏</button>{mode === "parent" && <button className="text-button inline" onClick={onAdjustGame}>家长调整</button>}</div></section>;
+  return <section className="card game-card"><div className="game-top"><div className="game-icon"><Gamepad2 /></div><div><p className="eyebrow">游戏时间管理</p><h2>{game.timer_status === "计时中" ? "正在游戏" : "今日可用时间"}</h2></div><StatusBadge status={game.timer_status} /></div><div className="timer-display"><strong>{formatClock(remainingSeconds)}</strong><span>剩余时间</span></div><div className="game-breakdown"><span>基础 <b>{game.base_minutes} 分钟</b></span><span>任务奖励 <b>+{game.earned_minutes} 分钟</b></span><span>兑换／临时 <b>{game.manual_adjustment >= 0 ? "+" : ""}{game.manual_adjustment} 分钟</b></span><span>已使用 <b>{Math.floor((getGameAvailableMinutes(profile, game) * 60 - remainingSeconds) / 60)} 分钟</b></span></div>{requiredTasksIncomplete && <p className="game-lock-note">完成今天的必做任务后，就可以开始游戏。</p>}<div className="game-actions">{game.timer_status === "计时中" ? <button className="secondary-button" onClick={() => onGameAction("pause")}><CirclePause size={18} />暂停计时</button> : <button className="primary-button" disabled={remainingSeconds <= 0 || requiredTasksIncomplete} onClick={() => onGameAction("start")}><CirclePlay size={18} />{requiredTasksIncomplete ? "先完成必做任务" : "开始游戏"}</button>}<button className="secondary-button" disabled={game.timer_status !== "计时中" && game.timer_status !== "已暂停"} onClick={() => onGameAction("stop")}><Check size={18} />结束游戏</button>{mode === "parent" && <button className="text-button inline" onClick={onAdjustGame}>家长调整</button>}</div></section>;
 }
 
 function TaskRow({ task, mode, onSubmit, onApprove, onReject, onPenalize }: { task: GrowthTask; mode: AppMode; onSubmit: () => void; onApprove: () => void; onReject: () => void; onPenalize: () => void }) {
@@ -911,11 +922,12 @@ function ManagedTask({ task, mode, onEdit, onDelete, onDuplicate, onPostpone, on
 }
 
 function RewardsView({ data, mode, onAdd, onEdit, onDelete, onRequest, onReview, onFulfill }: { data: AppData; mode: AppMode; onAdd: () => void; onEdit: (reward: Reward) => void; onDelete: (reward: Reward) => void; onRequest: (reward: Reward) => void; onReview: (redemption: Redemption, decision: "approve" | "reject") => void; onFulfill: (redemption: Redemption) => void }) {
-  return <div className="page-stack"><section className="reward-hero"><div><p className="eyebrow">星星奖励站</p><h2>努力换来期待的小奖励</h2><p>当前拥有 <strong>{data.profile.stars_balance}</strong> 颗星星</p></div><div className="big-star"><Star fill="currentColor" /><strong>{data.profile.stars_balance}</strong></div>{mode === "parent" && <button className="primary-button light" onClick={onAdd}><Plus size={18} />添加奖励</button>}</section><section><div className="section-heading"><div><p className="eyebrow">可以兑换</p><h2>奖励清单</h2></div></div><div className="reward-grid">{data.rewards.filter((reward) => reward.is_active || mode === "parent").map((reward) => <RewardCard key={reward.id} reward={reward} balance={data.profile.stars_balance} mode={mode} onRequest={() => onRequest(reward)} onEdit={() => onEdit(reward)} onDelete={() => onDelete(reward)} />)}{!data.rewards.length && <EmptyState icon={<Gift />} title="还没有奖励" text="家长可以创建一个孩子真正期待的小奖励。" />}</div></section><section className="card"><div className="section-heading"><div><p className="eyebrow">过程清楚可见</p><h2>兑换记录</h2></div></div><div className="redemption-list">{data.redemptions.length ? data.redemptions.map((item) => { const reward = data.rewards.find((candidate) => candidate.id === item.reward_id); return <article className="redemption-row" key={item.id}><span className="reward-emoji small">{reward?.icon ?? "🎁"}</span><div><h3>{reward?.title ?? "历史奖励"}</h3><p>{formatDateTime(item.requested_at)} · {item.cost} 颗星星</p></div><StatusBadge status={item.status} /><div className="redemption-actions">{mode === "parent" && item.status === "待审核" && <><button className="primary-button small" onClick={() => onReview(item, "approve")}>批准</button><button className="secondary-button small" onClick={() => onReview(item, "reject")}>拒绝</button></>}{mode === "parent" && item.status === "待兑现" && <button className="primary-button small" onClick={() => onFulfill(item)}>标记已兑现</button>}</div></article>; }) : <EmptyState icon={<Gift />} title="还没有兑换记录" text="完成任务积累星星，再来选择喜欢的奖励。" />}</div></section></div>;
+  return <div className="page-stack"><section className="reward-hero"><div><p className="eyebrow">星星奖励站</p><h2>努力换来期待的小奖励</h2><p>当前拥有 <strong>{data.profile.stars_balance}</strong> 颗星星</p></div><div className="big-star"><Star fill="currentColor" /><strong>{data.profile.stars_balance}</strong></div>{mode === "parent" && <button className="primary-button light" onClick={onAdd}><Plus size={18} />添加奖励</button>}</section><section><div className="section-heading"><div><p className="eyebrow">可以兑换</p><h2>奖励清单</h2></div></div><div className="reward-grid">{data.rewards.filter((reward) => reward.is_active || mode === "parent").map((reward) => <RewardCard key={reward.id} reward={reward} balance={data.profile.stars_balance} mode={mode} onRequest={() => onRequest(reward)} onEdit={() => onEdit(reward)} onDelete={() => onDelete(reward)} />)}{!data.rewards.length && <EmptyState icon={<Gift />} title="还没有奖励" text="家长可以创建一个孩子真正期待的小奖励。" />}</div></section><section className="card"><div className="section-heading"><div><p className="eyebrow">过程清楚可见</p><h2>兑换记录</h2></div></div><div className="redemption-list">{data.redemptions.length ? data.redemptions.map((item) => { const reward = data.rewards.find((candidate) => candidate.id === item.reward_id); return <article className="redemption-row" key={item.id}><span className="reward-emoji small">{reward?.icon ?? "🎁"}</span><div><h3>{reward?.title ?? "历史奖励"}</h3><p>{formatDateTime(item.requested_at)} · {item.cost} 颗星星{item.game_minutes_reward > 0 ? ` · +${item.game_minutes_reward} 分钟` : ""}</p></div><StatusBadge status={item.status} /><div className="redemption-actions">{mode === "parent" && item.status === "待审核" && <><button className="primary-button small" onClick={() => onReview(item, "approve")}>批准</button><button className="secondary-button small" onClick={() => onReview(item, "reject")}>拒绝</button></>}{mode === "parent" && item.status === "待兑现" && <button className="primary-button small" onClick={() => onFulfill(item)}>标记已兑现</button>}</div></article>; }) : <EmptyState icon={<Gift />} title="还没有兑换记录" text="完成任务积累星星，再来选择喜欢的奖励。" />}</div></section></div>;
 }
 
 function RewardCard({ reward, balance, mode, onRequest, onEdit, onDelete }: { reward: Reward; balance: number; mode: AppMode; onRequest: () => void; onEdit: () => void; onDelete: () => void }) {
-  return <article className={cn("reward-card", !reward.is_active && "disabled")}><div className="reward-emoji">{reward.icon || "🎁"}</div><div className="reward-card-top"><span>{reward.category}</span>{reward.stock !== null && <span>剩余 {reward.stock}</span>}</div><h3>{reward.title}</h3><p>{reward.description || "完成计划，用星星兑换这份奖励。"}</p><div className="reward-card-bottom"><strong><Star size={17} fill="currentColor" />{reward.cost}</strong>{mode === "child" ? <button className="primary-button small" disabled={!reward.is_active || balance < reward.cost || reward.stock === 0} onClick={onRequest}>{balance < reward.cost ? "星星不足" : "申请兑换"}</button> : <div className="compact-actions"><button className="icon-button" aria-label={`修改${reward.title}`} onClick={onEdit}><Pencil size={17} /></button><button className="icon-button danger" aria-label={`删除${reward.title}`} onClick={onDelete}><Trash2 size={17} /></button></div>}</div></article>;
+  const rewardMeta = [reward.game_minutes_reward > 0 ? `+${reward.game_minutes_reward} 分钟` : "", reward.stock !== null ? `剩余 ${reward.stock}` : ""].filter(Boolean).join(" · ");
+  return <article className={cn("reward-card", !reward.is_active && "disabled")}><div className="reward-emoji">{reward.icon || "🎁"}</div><div className="reward-card-top"><span>{reward.category}</span><span>{rewardMeta}</span></div><h3>{reward.title}</h3><p>{reward.description || "完成计划，用星星兑换这份奖励。"}</p><div className="reward-card-bottom"><strong><Star size={17} fill="currentColor" />{reward.cost}</strong>{mode === "child" ? <button className="primary-button small" disabled={!reward.is_active || balance < reward.cost || reward.stock === 0} onClick={onRequest}>{balance < reward.cost ? "星星不足" : "申请兑换"}</button> : <div className="compact-actions"><button className="icon-button" aria-label={`修改${reward.title}`} onClick={onEdit}><Pencil size={17} /></button><button className="icon-button danger" aria-label={`删除${reward.title}`} onClick={onDelete}><Trash2 size={17} /></button></div>}</div></article>;
 }
 
 function RecordsView({ data, mode, onSaveReview }: { data: AppData; mode: AppMode; onSaveReview: (review: DailyReview) => void }) {
@@ -999,8 +1011,9 @@ function PenaltyForm({ task, balance, onSubmit }: { task: GrowthTask; balance: n
 }
 
 function RewardForm({ reward, onSubmit }: { reward: Reward | null; onSubmit: (payload: Partial<Reward>) => void }) {
-  const [form, setForm] = useState<Partial<Reward>>(reward ?? { title: "", description: "", cost: 30, category: "娱乐", icon: "🎁", is_active: true, stock: null });
-  return <form className="modal-form" onSubmit={(e) => { e.preventDefault(); onSubmit({ ...form, cost: Number(form.cost), stock: form.stock === null || form.stock === undefined ? null : Number(form.stock) }); }}><div className="form-grid icon-title"><label>图标<input value={form.icon ?? ""} onChange={(e) => setForm({ ...form, icon: e.target.value })} maxLength={4} /></label><label>奖励名称<input value={form.title ?? ""} onChange={(e) => setForm({ ...form, title: e.target.value })} required maxLength={80} autoFocus /></label></div><label>奖励说明<textarea value={form.description ?? ""} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={240} placeholder="什么时候用、是否需要提前约定" /></label><div className="form-grid three"><label>所需星星<input type="number" min="1" max="9999" value={form.cost} onChange={(e) => setForm({ ...form, cost: Number(e.target.value) })} /></label><label>奖励分类<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{REWARD_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label><label>可兑换次数<input type="number" min="0" value={form.stock ?? ""} onChange={(e) => setForm({ ...form, stock: e.target.value === "" ? null : Number(e.target.value) })} placeholder="不填则不限" /></label></div><label className="check-line"><input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} />启用这个奖励</label><button className="primary-button wide">{reward ? "保存修改" : "创建奖励"}</button></form>;
+  const [form, setForm] = useState<Partial<Reward>>(reward ?? { title: "", description: "", cost: 30, category: "娱乐", icon: "🎁", is_active: true, stock: null, game_minutes_reward: 0 });
+  const isGameReward = form.category === "游戏";
+  return <form className="modal-form" onSubmit={(e) => { e.preventDefault(); onSubmit({ ...form, cost: Number(form.cost), stock: form.stock === null || form.stock === undefined ? null : Number(form.stock), game_minutes_reward: isGameReward ? Number(form.game_minutes_reward ?? 0) : 0 }); }}><div className="form-grid icon-title"><label>图标<input value={form.icon ?? ""} onChange={(e) => setForm({ ...form, icon: e.target.value })} maxLength={4} /></label><label>奖励名称<input value={form.title ?? ""} onChange={(e) => setForm({ ...form, title: e.target.value })} required maxLength={80} autoFocus /></label></div><label>奖励说明<textarea value={form.description ?? ""} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={240} placeholder="什么时候用、是否需要提前约定" /></label><div className="form-grid three"><label>所需星星<input type="number" min="1" max="9999" value={form.cost} onChange={(e) => setForm({ ...form, cost: Number(e.target.value) })} /></label><label>奖励分类<select value={form.category} onChange={(e) => { const category = e.target.value; setForm({ ...form, category, game_minutes_reward: category === "游戏" ? form.game_minutes_reward ?? 0 : 0 }); }}>{REWARD_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label><label>可兑换次数<input type="number" min="0" value={form.stock ?? ""} onChange={(e) => setForm({ ...form, stock: e.target.value === "" ? null : Number(e.target.value) })} placeholder="不填则不限" /></label></div>{isGameReward && <><label>自动增加游戏时间（分钟）<input type="number" inputMode="numeric" min="1" max="600" value={form.game_minutes_reward ?? 0} onChange={(e) => setForm({ ...form, game_minutes_reward: Number(e.target.value) })} required /></label><div className="info-banner compact">孩子申请后，家长批准兑换时会把这些分钟自动加入当天游戏时间，并且只增加一次。</div></>}<label className="check-line"><input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} />启用这个奖励</label><button className="primary-button wide">{reward ? "保存修改" : "创建奖励"}</button></form>;
 }
 
 function PinForm({ setup, onSubmit }: { setup: boolean; onSubmit: (pin: string) => void }) {
