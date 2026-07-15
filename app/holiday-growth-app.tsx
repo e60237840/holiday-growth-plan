@@ -127,6 +127,10 @@ function getLiveUsedSeconds(game: GameRecord, now: number) {
   return game.used_seconds + running;
 }
 
+function getRemainingGameSeconds(profile: Profile, game: GameRecord, now: number) {
+  return Math.max(0, getGameAvailableMinutes(profile, game) * 60 - getLiveUsedSeconds(game, now));
+}
+
 function getWeekDates() {
   const current = new Date();
   const day = current.getDay() || 7;
@@ -137,6 +141,24 @@ function getWeekDates() {
     date.setDate(monday.getDate() + index);
     return date.toLocaleDateString("en-CA");
   });
+}
+
+function sortTasksStable(tasks: GrowthTask[]) {
+  return [...tasks].sort((left, right) => {
+    const leftKey = `${left.task_date}|${left.start_time ?? "99:99:99"}|${left.created_at ?? ""}|${left.id}`;
+    const rightKey = `${right.task_date}|${right.start_time ?? "99:99:99"}|${right.created_at ?? ""}|${right.id}`;
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+function useLiveNow(running: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  return now;
 }
 
 export default function HolidayGrowthApp() {
@@ -155,12 +177,35 @@ export default function HolidayGrowthApp() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(0);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const preparedUserRef = useRef<string | null>(null);
 
   const notify = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 2800);
+  }, []);
+
+  const prepareFamilyData = useCallback(async (userId: string) => {
+    if (!isSupabaseConfigured || !supabase || preparedUserRef.current === userId) return;
+    preparedUserRef.current = userId;
+    try {
+      const { error: profileError } = await withTimeout(supabase.from("profiles").upsert({ user_id: userId }, { onConflict: "user_id", ignoreDuplicates: true }), 12000, "profile request timed out");
+      if (profileError) throw profileError;
+
+      const { data: profile, error: profileReadError } = await withTimeout(supabase.from("profiles").select("timezone").eq("user_id", userId).single(), 12000, "profile timezone request timed out");
+      if (profileReadError) throw profileReadError;
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+      if (profile.timezone !== timezone) {
+        const { error: timezoneError } = await withTimeout(supabase.from("profiles").update({ timezone }).eq("user_id", userId), 12000, "timezone request timed out");
+        if (timezoneError) throw timezoneError;
+      }
+
+      const { error: gameError } = await withTimeout(supabase.rpc("ensure_today_game_record"), 12000, "game record request timed out");
+      if (gameError) throw gameError;
+    } catch (cause) {
+      preparedUserRef.current = null;
+      throw cause;
+    }
   }, []);
 
   const loadData = useCallback(async (userId: string | null) => {
@@ -174,18 +219,11 @@ export default function HolidayGrowthApp() {
     setLoading(true);
     setError(null);
     try {
-      const { error: profileError } = await withTimeout(supabase.from("profiles").upsert({ user_id: id }, { onConflict: "user_id", ignoreDuplicates: true }), 12000, "profile request timed out");
-      if (profileError) throw profileError;
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
-      const { error: timezoneError } = await withTimeout(supabase.from("profiles").update({ timezone }).eq("user_id", id), 12000, "timezone request timed out");
-      if (timezoneError) throw timezoneError;
-      const { error: gameError } = await withTimeout(supabase.rpc("ensure_today_game_record"), 12000, "game record request timed out");
-      if (gameError) throw gameError;
       const today = TODAY();
       const weekStart = getWeekDates()[0];
       const [profileResult, tasksResult, pointsResult, rewardsResult, redemptionsResult, gameResult, gameHistoryResult, reviewsResult] = await withTimeout(Promise.all([
         supabase.from("profiles").select("id,user_id,child_name,avatar_url,holiday_start,holiday_end,timezone,stars_balance,base_game_minutes,max_game_minutes,require_tasks_before_game,streak_reward,daily_points_cap,parent_pin_set,holiday_goals").eq("user_id", id).single(),
-        supabase.from("tasks").select("*").eq("user_id", id).gte("task_date", weekStart).order("task_date").order("start_time"),
+        supabase.from("tasks").select("*").eq("user_id", id).gte("task_date", weekStart).order("task_date").order("start_time", { nullsFirst: false }).order("created_at").order("id"),
         supabase.from("point_transactions").select("*").eq("user_id", id).order("created_at", { ascending: false }).limit(100),
         supabase.from("rewards").select("*").eq("user_id", id).order("created_at", { ascending: false }),
         supabase.from("reward_redemptions").select("*").eq("user_id", id).order("requested_at", { ascending: false }).limit(100),
@@ -198,7 +236,7 @@ export default function HolidayGrowthApp() {
       if (!profileResult.data || !gameResult.data) throw new Error("Missing profile or game record");
       setData({
         profile: { ...profileResult.data, holiday_goals: profileResult.data.holiday_goals ?? [] } as Profile,
-        tasks: (tasksResult.data ?? []) as GrowthTask[],
+        tasks: sortTasksStable((tasksResult.data ?? []) as GrowthTask[]),
         points: pointsResult.data ?? [],
         rewards: rewardsResult.data ?? [],
         redemptions: redemptionsResult.data ?? [],
@@ -237,15 +275,40 @@ export default function HolidayGrowthApp() {
         const id = authData.session?.user.id ?? null;
         setSessionUserId(id);
         setAuthReady(true);
-        if (id) void loadData(id);
+        if (id) {
+          void prepareFamilyData(id)
+            .then(() => {
+              if (active) return loadData(id);
+            })
+            .catch((cause) => {
+              console.error(cause);
+              if (active) {
+                setError("家庭数据初始化失败，请检查网络后重试。");
+                setLoading(false);
+              }
+            });
+        }
         else setLoading(false);
 
         const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
           if (!active) return;
           const nextId = session?.user.id ?? null;
           setSessionUserId(nextId);
-          if (nextId) void loadData(nextId);
+          if (nextId) {
+            void prepareFamilyData(nextId)
+              .then(() => {
+                if (active) return loadData(nextId);
+              })
+              .catch((cause) => {
+                console.error(cause);
+                if (active) {
+                  setError("家庭数据初始化失败，请检查网络后重试。");
+                  setLoading(false);
+                }
+              });
+          }
           else {
+            preparedUserRef.current = null;
             setData(null);
             setLoading(false);
           }
@@ -265,7 +328,7 @@ export default function HolidayGrowthApp() {
       active = false;
       unsubscribe?.();
     };
-  }, [loadData]);
+  }, [loadData, prepareFamilyData]);
 
   useEffect(() => {
     const client = supabase;
@@ -289,11 +352,6 @@ export default function HolidayGrowthApp() {
       void client.removeChannel(channel);
     };
   }, [loadData, sessionUserId]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   async function runRemote(action: () => PromiseLike<{ error: unknown }>, success: string) {
     setError(null);
@@ -618,15 +676,12 @@ export default function HolidayGrowthApp() {
   if (isSupabaseConfigured && !sessionUserId) return <AuthScreen />;
   if (!data) return <StartupErrorScreen message={error ?? "云端数据没有成功加载，请重新尝试。"} />;
 
-  const todayTasks = data.tasks.filter((task) => task.task_date === TODAY() && task.is_active);
+  const todayTasks = sortTasksStable(data.tasks.filter((task) => task.task_date === TODAY() && task.is_active));
   const completed = todayTasks.filter((task) => task.status === "已完成").length;
   const progress = todayTasks.length ? Math.round((completed / todayTasks.length) * 100) : 0;
-  const liveUsed = getLiveUsedSeconds(data.game, now);
-  const availableSeconds = getGameAvailableMinutes(data.profile, data.game) * 60;
-  const remainingSeconds = Math.max(0, availableSeconds - liveUsed);
 
   const content = activeNav === "today" ? (
-    <TodayView data={data} mode={mode} tasks={todayTasks} progress={progress} remainingSeconds={remainingSeconds} onSubmitTask={submitTask} onApproveTask={(task) => { setApprovingTask(task); setModal("approval"); }} onRejectTask={rejectTask} onPenalizeTask={(task) => { setPenalizingTask(task); setModal("penalty"); }} onGameAction={gameAction} onAdjustGame={() => setModal("game")} />
+    <TodayView data={data} mode={mode} tasks={todayTasks} progress={progress} onSubmitTask={submitTask} onApproveTask={(task) => { setApprovingTask(task); setModal("approval"); }} onRejectTask={rejectTask} onPenalizeTask={(task) => { setPenalizingTask(task); setModal("penalty"); }} onGameAction={gameAction} onAdjustGame={() => setModal("game")} />
   ) : activeNav === "plan" ? (
     <PlanView data={data} mode={mode} onAdd={() => { setEditingTask(null); setModal("task"); }} onEdit={(task) => { setEditingTask(task); setModal("task"); }} onDelete={deleteTask} onDuplicate={duplicateTask} onPostpone={postponeTask} onToggle={(task) => patchTask(task, { is_active: !task.is_active }, task.is_active ? "任务已停用" : "任务已启用")} onSaveGoals={(goals) => saveProfile({ holiday_goals: goals })} />
   ) : activeNav === "rewards" ? (
@@ -781,31 +836,45 @@ function AuthScreen() {
   return <div className="auth-screen"><section className="auth-intro"><Brand /><div className="auth-copy"><p className="eyebrow">把假期过得充实，也过得轻松</p><h1>每完成一件小事，<br />成长就清晰一点。</h1><p>任务、星星、游戏时间和家庭奖励，放在一个简单的计划里。</p></div><div className="auth-note"><Star size={18} fill="currentColor" /> 今天的努力，会变成明天的自信。</div></section><section className="auth-panel"><form className="auth-card" onSubmit={submit}><div className="auth-icon"><UserRound size={22} /></div><h2>{isSignUp ? "创建家庭账号" : "欢迎回来"}</h2><p>{isSignUp ? "注册后，手机和电脑会使用同一份数据" : "登录后继续今天的成长计划"}</p><label>邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="name@example.com" autoComplete="email" /></label><label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} placeholder="至少 6 位" autoComplete={isSignUp ? "new-password" : "current-password"} /></label>{message && <div className="form-message">{message}</div>}<button className="primary-button wide" disabled={busy}>{busy ? "请稍候…" : isSignUp ? "创建账号" : "登录"}</button><button type="button" className="text-button" onClick={() => { setIsSignUp(!isSignUp); setMessage(""); }}>{isSignUp ? "已有账号？直接登录" : "还没有账号？创建一个"}</button></form></section></div>;
 }
 
-function TodayView({ data, mode, tasks, progress, remainingSeconds, onSubmitTask, onApproveTask, onRejectTask, onPenalizeTask, onGameAction, onAdjustGame }: {
-  data: AppData; mode: AppMode; tasks: GrowthTask[]; progress: number; remainingSeconds: number;
+function TodayView({ data, mode, tasks, progress, onSubmitTask, onApproveTask, onRejectTask, onPenalizeTask, onGameAction, onAdjustGame }: {
+  data: AppData; mode: AppMode; tasks: GrowthTask[]; progress: number;
   onSubmitTask: (task: GrowthTask) => void; onApproveTask: (task: GrowthTask) => void; onRejectTask: (task: GrowthTask) => void;
   onPenalizeTask: (task: GrowthTask) => void;
   onGameAction: (action: "start" | "pause" | "stop") => void; onAdjustGame: () => void;
 }) {
   const completed = tasks.filter((task) => task.status === "已完成").length;
-  const game = data.game;
-  const requiredTasksIncomplete = data.profile.require_tasks_before_game && tasks.some((task) => task.is_required && task.status !== "已完成");
   return <div className="today-grid"><section className="hero-card"><div className="progress-ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div><strong>{progress}%</strong><span>今日完成</span></div></div><div className="hero-copy"><p className="eyebrow">今日成长进度</p><h2>{progress === 100 ? "今天的计划全部完成了！" : progress >= 50 ? "已经完成一大半，继续保持" : "从第一件小事开始吧"}</h2><p>完成 <strong>{completed}</strong> 项，共 <strong>{tasks.length}</strong> 项</p><div className="linear-progress"><span style={{ width: `${progress}%` }} /></div></div><div className="hero-stars"><Star size={20} fill="currentColor" /><strong>{data.profile.stars_balance}</strong><span>当前星星</span></div></section>
 
     <section className="stats-row">
       <MiniStat icon={<CheckCircle2 />} label="今日任务" value={`${completed}/${tasks.length}`} tone="green" />
       <MiniStat icon={<Star />} label="当前星星" value={`${data.profile.stars_balance}`} tone="gold" />
-      <MiniStat icon={<Gamepad2 />} label="剩余游戏" value={`${Math.ceil(remainingSeconds / 60)} 分钟`} tone="blue" />
+      <LiveGameMiniStat profile={data.profile} game={data.game} />
     </section>
 
     <section className="card task-section"><div className="section-heading"><div><p className="eyebrow">今天还要做什么</p><h2>今日任务</h2></div><span className="section-count">{tasks.filter((task) => task.status !== "已完成").length} 项待完成</span></div><div className="task-list">{tasks.length ? tasks.map((task) => <TaskRow key={task.id} task={task} mode={mode} onSubmit={() => onSubmitTask(task)} onApprove={() => onApproveTask(task)} onReject={() => onRejectTask(task)} onPenalize={() => onPenalizeTask(task)} />) : <EmptyState icon={<CalendarDays />} title="今天还没有任务" text={mode === "parent" ? "到“计划”页面添加今天的安排吧。" : "今天暂时没有安排，好好享受假期。"} />}</div></section>
 
-    <section className="card game-card"><div className="game-top"><div className="game-icon"><Gamepad2 /></div><div><p className="eyebrow">游戏时间管理</p><h2>{game.timer_status === "计时中" ? "正在游戏" : "今日可用时间"}</h2></div><StatusBadge status={game.timer_status} /></div><div className="timer-display"><strong>{formatClock(remainingSeconds)}</strong><span>剩余时间</span></div><div className="game-breakdown"><span>基础 <b>{game.base_minutes} 分钟</b></span><span>任务奖励 <b>+{game.earned_minutes} 分钟</b></span><span>已使用 <b>{Math.floor((getGameAvailableMinutes(data.profile, game) * 60 - remainingSeconds) / 60)} 分钟</b></span></div>{requiredTasksIncomplete && <p className="game-lock-note">完成今天的必做任务后，就可以开始游戏。</p>}<div className="game-actions">{game.timer_status === "计时中" ? <button className="secondary-button" onClick={() => onGameAction("pause")}><CirclePause size={18} />暂停计时</button> : <button className="primary-button" disabled={remainingSeconds <= 0 || requiredTasksIncomplete} onClick={() => onGameAction("start")}><CirclePlay size={18} />{requiredTasksIncomplete ? "先完成必做任务" : "开始游戏"}</button>}<button className="secondary-button" disabled={game.timer_status !== "计时中" && game.timer_status !== "已暂停"} onClick={() => onGameAction("stop")}><Check size={18} />结束游戏</button>{mode === "parent" && <button className="text-button inline" onClick={onAdjustGame}>家长调整</button>}</div></section>
+    <GameCard profile={data.profile} game={data.game} tasks={tasks} mode={mode} onGameAction={onGameAction} onAdjustGame={onAdjustGame} />
   </div>;
 }
 
 function MiniStat({ icon, label, value, tone }: { icon: ReactNode; label: string; value: string; tone: string }) {
   return <div className="mini-stat"><span className={`mini-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong>{value}</strong></div></div>;
+}
+
+function LiveGameMiniStat({ profile, game }: { profile: Profile; game: GameRecord }) {
+  const now = useLiveNow(game.timer_status === "计时中");
+  const remainingSeconds = getRemainingGameSeconds(profile, game, now);
+  return <MiniStat icon={<Gamepad2 />} label="剩余游戏" value={`${Math.ceil(remainingSeconds / 60)} 分钟`} tone="blue" />;
+}
+
+function GameCard({ profile, game, tasks, mode, onGameAction, onAdjustGame }: {
+  profile: Profile; game: GameRecord; tasks: GrowthTask[]; mode: AppMode;
+  onGameAction: (action: "start" | "pause" | "stop") => void; onAdjustGame: () => void;
+}) {
+  const now = useLiveNow(game.timer_status === "计时中");
+  const remainingSeconds = getRemainingGameSeconds(profile, game, now);
+  const requiredTasksIncomplete = profile.require_tasks_before_game && tasks.some((task) => task.is_required && task.status !== "已完成");
+  return <section className="card game-card"><div className="game-top"><div className="game-icon"><Gamepad2 /></div><div><p className="eyebrow">游戏时间管理</p><h2>{game.timer_status === "计时中" ? "正在游戏" : "今日可用时间"}</h2></div><StatusBadge status={game.timer_status} /></div><div className="timer-display"><strong>{formatClock(remainingSeconds)}</strong><span>剩余时间</span></div><div className="game-breakdown"><span>基础 <b>{game.base_minutes} 分钟</b></span><span>任务奖励 <b>+{game.earned_minutes} 分钟</b></span><span>已使用 <b>{Math.floor((getGameAvailableMinutes(profile, game) * 60 - remainingSeconds) / 60)} 分钟</b></span></div>{requiredTasksIncomplete && <p className="game-lock-note">完成今天的必做任务后，就可以开始游戏。</p>}<div className="game-actions">{game.timer_status === "计时中" ? <button className="secondary-button" onClick={() => onGameAction("pause")}><CirclePause size={18} />暂停计时</button> : <button className="primary-button" disabled={remainingSeconds <= 0 || requiredTasksIncomplete} onClick={() => onGameAction("start")}><CirclePlay size={18} />{requiredTasksIncomplete ? "先完成必做任务" : "开始游戏"}</button>}<button className="secondary-button" disabled={game.timer_status !== "计时中" && game.timer_status !== "已暂停"} onClick={() => onGameAction("stop")}><Check size={18} />结束游戏</button>{mode === "parent" && <button className="text-button inline" onClick={onAdjustGame}>家长调整</button>}</div></section>;
 }
 
 function TaskRow({ task, mode, onSubmit, onApprove, onReject, onPenalize }: { task: GrowthTask; mode: AppMode; onSubmit: () => void; onApprove: () => void; onReject: () => void; onPenalize: () => void }) {
@@ -824,7 +893,7 @@ function PlanView({ data, mode, onAdd, onEdit, onDelete, onDuplicate, onPostpone
   const [tab, setTab] = useState<"today" | "week" | "goals">("today");
   const [goalDraft, setGoalDraft] = useState("");
   const dates = getWeekDates();
-  const visible = tab === "today" ? data.tasks.filter((task) => task.task_date === TODAY()) : data.tasks.filter((task) => dates.includes(task.task_date));
+  const visible = sortTasksStable(tab === "today" ? data.tasks.filter((task) => task.task_date === TODAY()) : data.tasks.filter((task) => dates.includes(task.task_date)));
   const grouped = dates.map((date) => ({ date, tasks: visible.filter((task) => task.task_date === date) })).filter((group) => tab !== "week" || group.tasks.length);
   function addGoal() {
     const value = goalDraft.trim();

@@ -85,6 +85,24 @@ test("client uses realtime sync and surfaces failures", () => {
   assert.match(app, /页面暂时没有加载成功/);
 });
 
+test("today tasks keep a stable order without realtime refresh loops", () => {
+  const loadDataStart = app.indexOf("const loadData = useCallback");
+  const loadDataEnd = app.indexOf("useEffect(() =>", loadDataStart);
+  const loadDataBlock = app.slice(loadDataStart, loadDataEnd);
+  const rootStart = app.indexOf("export default function HolidayGrowthApp");
+  const rootTimerEnd = app.indexOf("async function runRemote", rootStart);
+  const rootBeforeActions = app.slice(rootStart, rootTimerEnd);
+
+  assert.match(app, /function sortTasksStable/);
+  assert.match(app, /order\("start_time", \{ nullsFirst: false \}\)\.order\("created_at"\)\.order\("id"\)/);
+  assert.match(app, /const prepareFamilyData = useCallback/);
+  assert.doesNotMatch(loadDataBlock, /update\(\{ timezone \}\)/);
+  assert.doesNotMatch(loadDataBlock, /ensure_today_game_record/);
+  assert.doesNotMatch(rootBeforeActions, /setInterval/);
+  assert.match(app, /function LiveGameMiniStat/);
+  assert.match(app, /function GameCard/);
+});
+
 test("hosted client loads Supabase configuration from Worker runtime bindings", () => {
   assert.match(worker, /\/api\/supabase-config/);
   assert.match(worker, /NEXT_PUBLIC_SUPABASE_URL/);
