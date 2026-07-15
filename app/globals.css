@@ -312,8 +312,12 @@ input::placeholder, textarea::placeholder { color: #aaa9a4; }
 .empty-state strong { margin-top: 8px; font-size: 13px; }
 .empty-state p { max-width: 320px; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .toast { position: fixed; z-index: 200; right: 24px; bottom: 24px; display: flex; min-height: 45px; align-items: center; gap: 8px; border-radius: 13px; background: #294c3b; padding: 0 16px; color: white; box-shadow: 0 12px 35px rgba(33,60,47,.25); font-size: 11px; }
-.loading-screen { display: flex; min-height: 100vh; align-items: center; justify-content: center; gap: 14px; color: var(--green-dark); }
+.loading-screen { display: flex; min-height: 100vh; align-items: center; justify-content: center; gap: 14px; padding: 24px; color: var(--green-dark); text-align: left; }
+.loading-screen > div:last-child { display: flex; max-width: 390px; align-items: flex-start; flex-direction: column; gap: 6px; }
 .loading-screen strong { font-size: 13px; }
+.loading-screen span { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.loading-screen.error-state .brand-mark { background: var(--red-soft); color: var(--red); }
+.loading-screen.error-state .primary-button { margin-top: 8px; }
 
 .auth-screen { display: grid; min-height: 100vh; grid-template-columns: minmax(0, 1.2fr) minmax(420px,.8fr); background: var(--paper); }
 .auth-intro { display: flex; flex-direction: column; overflow: hidden; background: linear-gradient(145deg, #eef4ec, #f8f0df); padding: clamp(28px,5vw,70px); }

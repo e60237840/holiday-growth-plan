@@ -80,6 +80,9 @@ test("client uses realtime sync and surfaces failures", () => {
   assert.match(app, /postgres_changes/);
   assert.match(app, /操作没有成功，请稍后重试/);
   assert.match(app, /function makeId\(\)/);
+  assert.match(app, /function withTimeout/);
+  assert.match(app, /StartupErrorScreen/);
+  assert.match(app, /页面暂时没有加载成功/);
 });
 
 test("hosted client loads Supabase configuration from Worker runtime bindings", () => {
@@ -88,4 +91,5 @@ test("hosted client loads Supabase configuration from Worker runtime bindings", 
   assert.match(worker, /NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY/);
   assert.match(supabaseClient, /initializeSupabase/);
   assert.match(supabaseClient, /fetch\("\/api\/supabase-config"/);
+  assert.match(supabaseClient, /AbortController/);
 });

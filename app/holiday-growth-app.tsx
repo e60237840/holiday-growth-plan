@@ -77,6 +77,16 @@ function cn(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const rejection = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([Promise.resolve(promise), rejection]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
 // Some embedded and older browsers do not expose crypto.randomUUID yet.
 function makeId() {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
@@ -142,6 +152,7 @@ export default function HolidayGrowthApp() {
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(0);
@@ -163,16 +174,16 @@ export default function HolidayGrowthApp() {
     setLoading(true);
     setError(null);
     try {
-      const { error: profileError } = await supabase.from("profiles").upsert({ user_id: id }, { onConflict: "user_id", ignoreDuplicates: true });
+      const { error: profileError } = await withTimeout(supabase.from("profiles").upsert({ user_id: id }, { onConflict: "user_id", ignoreDuplicates: true }), 12000, "profile request timed out");
       if (profileError) throw profileError;
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
-      const { error: timezoneError } = await supabase.from("profiles").update({ timezone }).eq("user_id", id);
+      const { error: timezoneError } = await withTimeout(supabase.from("profiles").update({ timezone }).eq("user_id", id), 12000, "timezone request timed out");
       if (timezoneError) throw timezoneError;
-      const { error: gameError } = await supabase.rpc("ensure_today_game_record");
+      const { error: gameError } = await withTimeout(supabase.rpc("ensure_today_game_record"), 12000, "game record request timed out");
       if (gameError) throw gameError;
       const today = TODAY();
       const weekStart = getWeekDates()[0];
-      const [profileResult, tasksResult, pointsResult, rewardsResult, redemptionsResult, gameResult, gameHistoryResult, reviewsResult] = await Promise.all([
+      const [profileResult, tasksResult, pointsResult, rewardsResult, redemptionsResult, gameResult, gameHistoryResult, reviewsResult] = await withTimeout(Promise.all([
         supabase.from("profiles").select("id,user_id,child_name,avatar_url,holiday_start,holiday_end,timezone,stars_balance,base_game_minutes,max_game_minutes,require_tasks_before_game,streak_reward,daily_points_cap,parent_pin_set,holiday_goals").eq("user_id", id).single(),
         supabase.from("tasks").select("*").eq("user_id", id).gte("task_date", weekStart).order("task_date").order("start_time"),
         supabase.from("point_transactions").select("*").eq("user_id", id).order("created_at", { ascending: false }).limit(100),
@@ -181,7 +192,7 @@ export default function HolidayGrowthApp() {
         supabase.from("game_time_records").select("*").eq("user_id", id).eq("record_date", today).single(),
         supabase.from("game_time_records").select("*").eq("user_id", id).gte("record_date", weekStart).order("record_date"),
         supabase.from("daily_reviews").select("*").eq("user_id", id).gte("review_date", weekStart).order("review_date", { ascending: false }),
-      ]);
+      ]), 15000, "family data request timed out");
       const firstError = [profileResult, tasksResult, pointsResult, rewardsResult, redemptionsResult, gameResult, gameHistoryResult, reviewsResult].find((result) => result.error)?.error;
       if (firstError) throw firstError;
       if (!profileResult.data || !gameResult.data) throw new Error("Missing profile or game record");
@@ -197,7 +208,7 @@ export default function HolidayGrowthApp() {
       });
     } catch (cause) {
       console.error(cause);
-      setError("云端数据加载失败。请确认已经执行数据库脚本，并检查网络后重试。");
+      setError("云端数据加载失败或响应超时，请检查手机网络后重新加载。");
     } finally {
       setLoading(false);
     }
@@ -208,37 +219,45 @@ export default function HolidayGrowthApp() {
     let unsubscribe: (() => void) | undefined;
 
     async function startAuthentication() {
-      const configured = await initializeSupabase();
-      if (!active) return;
-      const client = supabase;
+      try {
+        const configured = await withTimeout(initializeSupabase(), 10000, "Supabase configuration timed out");
+        if (!active) return;
+        const client = supabase;
 
-      if (!configured || !client) {
-        setData((current) => current ?? createDemoData());
+        if (!configured || !client) {
+          setData((current) => current ?? createDemoData());
+          setLoading(false);
+          setAuthReady(true);
+          return;
+        }
+
+        const { data: authData, error: authError } = await withTimeout(client.auth.getSession(), 10000, "Login session request timed out");
+        if (!active) return;
+        if (authError) throw authError;
+        const id = authData.session?.user.id ?? null;
+        setSessionUserId(id);
+        setAuthReady(true);
+        if (id) void loadData(id);
+        else setLoading(false);
+
+        const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
+          if (!active) return;
+          const nextId = session?.user.id ?? null;
+          setSessionUserId(nextId);
+          if (nextId) void loadData(nextId);
+          else {
+            setData(null);
+            setLoading(false);
+          }
+        });
+        unsubscribe = () => listener.subscription.unsubscribe();
+      } catch (cause) {
+        console.error(cause);
+        if (!active) return;
+        setStartupError("登录和云端数据初始化超时。请检查手机网络，然后重新加载页面。");
         setLoading(false);
         setAuthReady(true);
-        return;
       }
-
-      const { data: authData, error: authError } = await client.auth.getSession();
-      if (!active) return;
-      if (authError) setError("登录服务连接失败，请刷新页面后重试。");
-      const id = authData.session?.user.id ?? null;
-      setSessionUserId(id);
-      setAuthReady(true);
-      if (id) void loadData(id);
-      else setLoading(false);
-
-      const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
-        if (!active) return;
-        const nextId = session?.user.id ?? null;
-        setSessionUserId(nextId);
-        if (nextId) void loadData(nextId);
-        else {
-          setData(null);
-          setLoading(false);
-        }
-      });
-      unsubscribe = () => listener.subscription.unsubscribe();
     }
 
     void startAuthentication();
@@ -594,9 +613,10 @@ export default function HolidayGrowthApp() {
     notify("数据文件已导出");
   }
 
-  if (!isClient || !authReady || (loading && !data)) return <LoadingScreen />;
+  if (!isClient || (!authReady && !startupError) || (loading && !data && !startupError)) return <LoadingScreen />;
+  if (startupError) return <StartupErrorScreen message={startupError} />;
   if (isSupabaseConfigured && !sessionUserId) return <AuthScreen />;
-  if (!data) return <LoadingScreen />;
+  if (!data) return <StartupErrorScreen message={error ?? "云端数据没有成功加载，请重新尝试。"} />;
 
   const todayTasks = data.tasks.filter((task) => task.task_date === TODAY() && task.is_active);
   const completed = todayTasks.filter((task) => task.status === "已完成").length;
@@ -733,7 +753,11 @@ function Avatar({ name, url }: { name: string; url?: string | null }) {
 }
 
 function LoadingScreen() {
-  return <div className="loading-screen"><div className="brand-mark"><Sparkles size={24} /></div><strong>正在准备今天的成长计划…</strong></div>;
+  return <div className="loading-screen" role="status"><div className="brand-mark"><Sparkles size={24} /></div><div><strong>正在准备今天的成长计划…</strong><span>网络较慢时可能需要几秒钟</span></div></div>;
+}
+
+function StartupErrorScreen({ message }: { message: string }) {
+  return <div className="loading-screen error-state" role="alert"><div className="brand-mark"><RefreshCcw size={24} /></div><div><strong>页面暂时没有加载成功</strong><span>{message}</span><button className="primary-button" onClick={() => window.location.reload()}><RefreshCcw size={17} />重新加载</button></div></div>;
 }
 
 function AuthScreen() {

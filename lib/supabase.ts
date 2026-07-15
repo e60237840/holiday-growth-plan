@@ -18,6 +18,7 @@ export let supabase: SupabaseClient | null = isSupabaseConfigured
   : null;
 
 let initialization: Promise<boolean> | null = null;
+const RUNTIME_CONFIG_TIMEOUT_MS = 8000;
 
 function configureClient(config: SupabaseRuntimeConfig) {
   const url = config.url?.trim();
@@ -40,15 +41,19 @@ export async function initializeSupabase() {
   if (initialization) return initialization;
   if (typeof window === "undefined") return false;
 
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), RUNTIME_CONFIG_TIMEOUT_MS);
   initialization = fetch("/api/supabase-config", {
     cache: "no-store",
     headers: { accept: "application/json" },
+    signal: controller.signal,
   })
     .then(async (response) => {
       if (!response.ok) return false;
       return configureClient(await response.json() as SupabaseRuntimeConfig);
     })
-    .catch(() => false);
+    .catch(() => false)
+    .finally(() => window.clearTimeout(timeout));
 
   return initialization;
 }
