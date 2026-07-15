@@ -54,6 +54,19 @@ test("task penalties are bounded, idempotent, and recorded", () => {
   assert.match(app, /确认记录并扣星/);
 });
 
+test("parent approval can award a bounded custom amount exactly once", () => {
+  assert.match(sql, /star_awarded integer check \(star_awarded between 0 and 999\)/i);
+  assert.match(sql, /function public\.approve_task\([\s\S]*?p_awarded_stars integer default null/i);
+  assert.match(sql, /v_requested_stars < 0 or v_requested_stars > v_task\.star_reward/i);
+  assert.match(sql, /adjustment reason required/i);
+  assert.match(sql, /v_star_amount := least\(v_requested_stars/i);
+  assert.match(sql, /reward_granted = true,[\s\S]*?star_awarded = v_star_amount/i);
+  assert.match(app, /确认并评分/);
+  assert.match(app, /实际奖励星星/);
+  assert.match(app, /这里只减少本次任务奖励/);
+  assert.match(app, /p_awarded_stars: requestedStars/);
+});
+
 test("mobile layout uses bottom navigation and blocks horizontal overflow", () => {
   assert.match(css, /@media\s*\(max-width:\s*760px\)/i);
   assert.match(css, /overflow-x:\s*hidden/i);

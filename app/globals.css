@@ -107,6 +107,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 14px; margin-top: 9px; color: #7a817d; font-size: 10px; }
 .task-meta span { display: inline-flex; align-items: center; gap: 4px; }
 .task-meta .reward-meta { color: #a36e1d; }
+.task-meta .reward-meta small { color: var(--muted); font-size: 9px; text-decoration: line-through; }
 .task-meta .penalty-meta { color: var(--red); }
 .task-meta .game-meta { color: var(--blue); }
 .required-tag { border-radius: 4px; background: var(--red-soft); padding: 2px 5px; color: var(--red); font-size: 9px; font-weight: 700; }
@@ -114,6 +115,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .done-mark { display: flex; align-items: center; gap: 5px; color: var(--green); font-size: 11px; font-weight: 700; }
 .waiting-copy { color: #a26a20; font-size: 11px; }
 .penalty-note { color: #9d4b45 !important; font-size: 11px !important; }
+.approval-note { color: #8a6427 !important; font-size: 11px !important; }
 .penalty-button { border-color: #e7c7c4; color: var(--red); background: #fff8f7; }
 .penalty-mark { color: var(--red); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .status-badge { flex: 0 0 auto; border-radius: 999px; background: #f0eee9; padding: 4px 7px; color: #6e7671; font-size: 9px; white-space: nowrap; }
@@ -292,6 +294,10 @@ input::placeholder, textarea::placeholder { color: #aaa9a4; }
 .modal-card > header h2 { margin: 0; font: 600 21px Georgia, serif; }
 .modal-form { display: flex; flex-direction: column; gap: 15px; padding: 21px; }
 .form-intro { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.approval-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+.approval-summary span { display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 11px; background: #fbfaf6; padding: 10px; color: var(--muted); font-size: 9px; text-align: center; }
+.approval-summary strong { color: var(--green-dark); font-size: 17px; }
+.approval-summary.adjusted span:nth-child(2) strong { color: var(--red); }
 .pin-input { height: 55px; text-align: center; font-size: 24px; letter-spacing: .35em; }
 .weekday-picker { display: flex; flex-wrap: wrap; gap: 6px; }
 .weekday-picker button { min-height: 36px; border: 1px solid var(--line); border-radius: 9px; background: white; padding: 0 11px; color: var(--muted); cursor: pointer; font-size: 10px; }
@@ -404,6 +410,8 @@ input::placeholder, textarea::placeholder { color: #aaa9a4; }
   .modal-card, .modal-card.narrow { width: 100%; max-height: 92vh; border-radius: 22px 22px 0 0; }
   .modal-card > header { padding: 16px; }
   .modal-form { padding: 17px; }
+  .approval-summary { grid-template-columns: 1fr; }
+  .approval-summary span { grid-template-columns: 1fr auto; align-items: center; text-align: left; }
   .check-grid { grid-template-columns: 1fr; }
   .toast { right: 14px; bottom: calc(80px + env(safe-area-inset-bottom)); left: 14px; justify-content: center; }
   .error-banner { width: calc(100% - 28px); margin-top: 12px; }

@@ -6,7 +6,7 @@
 
 - 邮箱注册与登录，所有数据按登录用户隔离
 - 今日任务、创建/修改/删除/复制/顺延、重复任务
-- 孩子提交、家长确认、星星与游戏时间一次性发放
+- 孩子提交、家长确认时可按完成质量调整实际奖励，星星与游戏时间一次性发放
 - 任务可设置未完成扣星；家长填写原因后确认，最多扣到 0 且只执行一次
 - 奖励管理、兑换申请、批准/拒绝、兑现记录
 - 完整星星流水，余额不能为负数
@@ -25,6 +25,10 @@
 若数据库已经执行过旧版脚本，只需在 SQL Editor 中执行
 [`supabase/migration-add-task-penalties.sql`](supabase/migration-add-task-penalties.sql)，
 即可保留原有任务和记录并增加任务惩罚功能。
+
+如果已经完成上面的惩罚升级，再执行
+[`supabase/migration-adjust-task-reward.sql`](supabase/migration-adjust-task-reward.sql)，
+即可增加“家长确认时调整实际奖励星星”功能。少于原定奖励时必须填写原因，旧任务和流水都会保留。
 
 Publishable Key 会被前端使用，它不是服务端密钥。真正的数据安全由 SQL 中的 RLS、用户隔离策略和数据库事务函数保证。不要在本项目中使用 `service_role` 密钥。
 

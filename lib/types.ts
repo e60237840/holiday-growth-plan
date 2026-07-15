@@ -42,6 +42,7 @@ export interface GrowthTask {
   completed_at: string | null;
   approved_at: string | null;
   reward_granted: boolean;
+  star_awarded: number | null;
   penalty_applied: boolean;
   penalized_at: string | null;
   parent_note: string | null;

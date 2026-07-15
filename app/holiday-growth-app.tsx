@@ -48,7 +48,7 @@ import type {
 
 type NavKey = "today" | "plan" | "rewards" | "records" | "settings";
 type AppMode = "child" | "parent";
-type ModalName = "task" | "reward" | "pin" | "points" | "game" | "penalty" | null;
+type ModalName = "task" | "reward" | "pin" | "points" | "game" | "approval" | "penalty" | null;
 
 const CATEGORIES: TaskCategory[] = ["学习", "阅读", "运动", "兴趣", "家务", "生活", "娱乐", "其他"];
 const REWARD_CATEGORIES = ["游戏", "娱乐", "食物", "物品", "亲子活动", "自由选择", "其他"];
@@ -135,6 +135,7 @@ export default function HolidayGrowthApp() {
   const [mode, setMode] = useState<AppMode>("child");
   const [modal, setModal] = useState<ModalName>(null);
   const [editingTask, setEditingTask] = useState<GrowthTask | null>(null);
+  const [approvingTask, setApprovingTask] = useState<GrowthTask | null>(null);
   const [penalizingTask, setPenalizingTask] = useState<GrowthTask | null>(null);
   const [editingReward, setEditingReward] = useState<Reward | null>(null);
   const [data, setData] = useState<AppData | null>(null);
@@ -301,19 +302,30 @@ export default function HolidayGrowthApp() {
     await runRemote(() => configuredSupabase().rpc("submit_task_completion", { p_task_id: task.id }), task.require_parent_approval ? "已提交，等待家长确认" : "任务完成，奖励已到账");
   }
 
-  async function approveTask(task: GrowthTask) {
+  async function approveTask(task: GrowthTask, awardedStars: number, reason: string) {
+    const requestedStars = Math.max(0, Math.min(task.star_reward, Math.floor(awardedStars)));
     if (!isSupabaseConfigured || !supabase) {
       if (task.reward_granted) return;
+      const todayEarned = data?.points
+        .filter((point) => point.amount > 0 && point.created_at.slice(0, 10) === TODAY())
+        .reduce((sum, point) => sum + point.amount, 0) ?? 0;
+      const actualStars = Math.min(requestedStars, Math.max((data?.profile.daily_points_cap ?? requestedStars) - todayEarned, 0));
+      const adjustmentNote = requestedStars < task.star_reward ? reason.trim() : null;
       updateDemo((current) => ({
         ...current,
-        profile: { ...current.profile, stars_balance: current.profile.stars_balance + task.star_reward },
-        tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: "已完成", approved_at: new Date().toISOString(), reward_granted: true } : item),
+        profile: { ...current.profile, stars_balance: current.profile.stars_balance + actualStars },
+        tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: "已完成", approved_at: new Date().toISOString(), reward_granted: true, star_awarded: actualStars, parent_note: adjustmentNote } : item),
         game: { ...current.game, earned_minutes: Math.min(current.profile.max_game_minutes - current.game.base_minutes, current.game.earned_minutes + task.game_minutes_reward) },
-        points: [{ id: makeId(), user_id: "demo-user", task_id: task.id, amount: task.star_reward, reason: task.title, transaction_type: "完成任务奖励", operator: "家长", balance_after: current.profile.stars_balance + task.star_reward, created_at: new Date().toISOString() }, ...current.points],
-      }), "已确认，星星和游戏时间已发放");
+        points: actualStars > 0 ? [{ id: makeId(), user_id: "demo-user", task_id: task.id, amount: actualStars, reason: adjustmentNote ? `${task.title}（原定 ${task.star_reward} 星，实际 ${actualStars} 星：${adjustmentNote}）` : task.title, transaction_type: "完成任务奖励", operator: "家长", balance_after: current.profile.stars_balance + actualStars, created_at: new Date().toISOString() }, ...current.points] : current.points,
+      }), `已确认，实际发放 ${actualStars} 颗星星`);
+      setModal(null);
+      setApprovingTask(null);
       return;
     }
-    await runRemote(() => configuredSupabase().rpc("approve_task", { p_task_id: task.id }), "已确认，星星和游戏时间已发放");
+    if (await runRemote(() => configuredSupabase().rpc("approve_task", { p_task_id: task.id, p_awarded_stars: requestedStars, p_reason: reason.trim() || null }), `已确认，申请发放 ${requestedStars} 颗星星`)) {
+      setModal(null);
+      setApprovingTask(null);
+    }
   }
 
   async function rejectTask(task: GrowthTask) {
@@ -384,7 +396,7 @@ export default function HolidayGrowthApp() {
   }
 
   async function duplicateTask(task: GrowthTask) {
-    const copy = { ...task, id: makeId(), title: `${task.title}（副本）`, status: "未开始" as const, reward_granted: false, penalty_applied: false, penalized_at: null, completed_at: null, approved_at: null };
+    const copy = { ...task, id: makeId(), title: `${task.title}（副本）`, status: "未开始" as const, reward_granted: false, star_awarded: null, penalty_applied: false, penalized_at: null, completed_at: null, approved_at: null, parent_note: null };
     if (!isSupabaseConfigured || !supabase) {
       updateDemo((current) => ({ ...current, tasks: [...current.tasks, copy] }), "任务已复制");
       return;
@@ -594,7 +606,7 @@ export default function HolidayGrowthApp() {
   const remainingSeconds = Math.max(0, availableSeconds - liveUsed);
 
   const content = activeNav === "today" ? (
-    <TodayView data={data} mode={mode} tasks={todayTasks} progress={progress} remainingSeconds={remainingSeconds} onSubmitTask={submitTask} onApproveTask={approveTask} onRejectTask={rejectTask} onPenalizeTask={(task) => { setPenalizingTask(task); setModal("penalty"); }} onGameAction={gameAction} onAdjustGame={() => setModal("game")} />
+    <TodayView data={data} mode={mode} tasks={todayTasks} progress={progress} remainingSeconds={remainingSeconds} onSubmitTask={submitTask} onApproveTask={(task) => { setApprovingTask(task); setModal("approval"); }} onRejectTask={rejectTask} onPenalizeTask={(task) => { setPenalizingTask(task); setModal("penalty"); }} onGameAction={gameAction} onAdjustGame={() => setModal("game")} />
   ) : activeNav === "plan" ? (
     <PlanView data={data} mode={mode} onAdd={() => { setEditingTask(null); setModal("task"); }} onEdit={(task) => { setEditingTask(task); setModal("task"); }} onDelete={deleteTask} onDuplicate={duplicateTask} onPostpone={postponeTask} onToggle={(task) => patchTask(task, { is_active: !task.is_active }, task.is_active ? "任务已停用" : "任务已启用")} onSaveGoals={(goals) => saveProfile({ holiday_goals: goals })} />
   ) : activeNav === "rewards" ? (
@@ -645,6 +657,7 @@ export default function HolidayGrowthApp() {
       {modal === "pin" && <Modal title={data.profile.parent_pin_set ? "进入家长模式" : "设置家长密码"} onClose={() => setModal(null)} narrow><PinForm setup={!data.profile.parent_pin_set} onSubmit={(pin) => void verifyPin(pin)} /></Modal>}
       {modal === "points" && <Modal title="调整星星" onClose={() => setModal(null)} narrow><AdjustmentForm unit="颗星星" onSubmit={(amount, reason) => void adjustPoints(amount, reason)} /></Modal>}
       {modal === "game" && <Modal title="调整游戏时间" onClose={() => setModal(null)} narrow><AdjustmentForm unit="分钟" onSubmit={(amount, reason) => void adjustGame(amount, reason)} /></Modal>}
+      {modal === "approval" && approvingTask && <Modal title="确认任务奖励" onClose={() => { setModal(null); setApprovingTask(null); }} narrow><ApprovalForm task={approvingTask} onSubmit={(awardedStars, reason) => void approveTask(approvingTask, awardedStars, reason)} /></Modal>}
       {modal === "penalty" && penalizingTask && <Modal title="记录任务未完成" onClose={() => { setModal(null); setPenalizingTask(null); }} narrow><PenaltyForm task={penalizingTask} balance={data.profile.stars_balance} onSubmit={(result, reason) => void penalizeTask(penalizingTask, result, reason)} /></Modal>}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
     </div>
@@ -698,6 +711,7 @@ function createTaskInstances(payload: Partial<GrowthTask>, id: string | null, pr
     completed_at: null,
     approved_at: null,
     reward_granted: false,
+    star_awarded: null,
     penalty_applied: false,
     penalized_at: null,
     parent_note: null,
@@ -773,7 +787,11 @@ function MiniStat({ icon, label, value, tone }: { icon: ReactNode; label: string
 function TaskRow({ task, mode, onSubmit, onApprove, onReject, onPenalize }: { task: GrowthTask; mode: AppMode; onSubmit: () => void; onApprove: () => void; onReject: () => void; onPenalize: () => void }) {
   const meta = categoryMeta[task.category] ?? categoryMeta.其他;
   const Icon = meta.icon;
-  return <article className={cn("task-row", task.status === "已完成" && "completed")}><div className={`task-category ${meta.tone}`}><Icon size={20} /></div><div className="task-main"><div className="task-title-line"><h3>{task.title}</h3>{task.is_required && <span className="required-tag">必做</span>}<StatusBadge status={task.status} /></div><p>{task.description || `${task.category}任务`}</p>{task.parent_note && task.status === "未完成" && <p className="penalty-note">家长说明：{task.parent_note}</p>}<div className="task-meta">{task.start_time && <span><Clock3 size={14} />{task.start_time.slice(0, 5)}</span>}<span>{task.duration_minutes} 分钟</span><span className="reward-meta"><Star size={14} fill="currentColor" />+{task.star_reward}</span>{task.star_penalty > 0 && <span className="penalty-meta"><Star size={14} />-{task.star_penalty}</span>}{task.game_minutes_reward > 0 && <span className="game-meta"><Gamepad2 size={14} />+{task.game_minutes_reward} 分钟</span>}</div></div><div className="task-actions">{mode === "child" && ["未开始", "进行中", "未完成"].includes(task.status) && <button className="primary-button small" onClick={onSubmit}>完成任务</button>}{mode === "parent" && task.status === "待家长确认" && <><button className="primary-button small" onClick={onApprove}><Check size={16} />确认</button><button className="secondary-button small" onClick={onReject}><X size={16} />退回</button></>}{mode === "parent" && task.status !== "已完成" && task.star_penalty > 0 && !task.penalty_applied && <button className="secondary-button small penalty-button" onClick={onPenalize}><Star size={15} />扣星</button>}{task.penalty_applied && <span className="penalty-mark">惩罚已记录</span>}{task.status === "已完成" && <span className="done-mark"><CheckCircle2 size={22} />已完成</span>}{task.status === "待家长确认" && mode === "child" && <span className="waiting-copy">等待家长确认</span>}</div></article>;
+  const awardedStars = task.status === "已完成" && task.star_awarded !== null && task.star_awarded !== undefined
+    ? task.star_awarded
+    : task.star_reward;
+  const rewardAdjusted = task.status === "已完成" && task.star_awarded !== null && task.star_awarded !== undefined && task.star_awarded < task.star_reward;
+  return <article className={cn("task-row", task.status === "已完成" && "completed")}><div className={`task-category ${meta.tone}`}><Icon size={20} /></div><div className="task-main"><div className="task-title-line"><h3>{task.title}</h3>{task.is_required && <span className="required-tag">必做</span>}<StatusBadge status={task.status} /></div><p>{task.description || `${task.category}任务`}</p>{task.parent_note && task.status === "未完成" && <p className="penalty-note">家长说明：{task.parent_note}</p>}{task.parent_note && rewardAdjusted && <p className="approval-note">家长评价：{task.parent_note}</p>}<div className="task-meta">{task.start_time && <span><Clock3 size={14} />{task.start_time.slice(0, 5)}</span>}<span>{task.duration_minutes} 分钟</span><span className="reward-meta"><Star size={14} fill="currentColor" />+{awardedStars}{rewardAdjusted && <small>（原定 +{task.star_reward}）</small>}</span>{task.star_penalty > 0 && <span className="penalty-meta"><Star size={14} />-{task.star_penalty}</span>}{task.game_minutes_reward > 0 && <span className="game-meta"><Gamepad2 size={14} />+{task.game_minutes_reward} 分钟</span>}</div></div><div className="task-actions">{mode === "child" && ["未开始", "进行中", "未完成"].includes(task.status) && <button className="primary-button small" onClick={onSubmit}>完成任务</button>}{mode === "parent" && task.status === "待家长确认" && <><button className="primary-button small" onClick={onApprove}><Check size={16} />确认并评分</button><button className="secondary-button small" onClick={onReject}><X size={16} />退回</button></>}{mode === "parent" && task.status !== "已完成" && task.star_penalty > 0 && !task.penalty_applied && <button className="secondary-button small penalty-button" onClick={onPenalize}><Star size={15} />扣星</button>}{task.penalty_applied && <span className="penalty-mark">惩罚已记录</span>}{task.status === "已完成" && <span className="done-mark"><CheckCircle2 size={22} />已完成</span>}{task.status === "待家长确认" && mode === "child" && <span className="waiting-copy">等待家长确认</span>}</div></article>;
 }
 
 function PlanView({ data, mode, onAdd, onEdit, onDelete, onDuplicate, onPostpone, onToggle, onSaveGoals }: {
@@ -868,6 +886,16 @@ function TaskForm({ task, profile, onSubmit }: { task: GrowthTask | null; profil
   const [form, setForm] = useState<Partial<GrowthTask>>(task ?? { title: "", description: "", category: "学习", task_date: TODAY(), start_time: "09:00", duration_minutes: 30, star_reward: 5, star_penalty: 0, game_minutes_reward: 0, repeat_type: "不重复", weekdays: [], require_parent_approval: true, is_required: false, is_active: true });
   const submit = (event: FormEvent) => { event.preventDefault(); onSubmit({ ...form, duration_minutes: Number(form.duration_minutes), star_reward: Number(form.star_reward), star_penalty: Number(form.star_penalty), game_minutes_reward: Number(form.game_minutes_reward) }); };
   return <form className="modal-form" onSubmit={submit}><label>任务名称<input value={form.title ?? ""} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="例如：完成数学练习" required maxLength={80} autoFocus /></label><div className="form-grid two"><label>任务分类<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as TaskCategory })}>{CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label><label>日期<input type="date" min={profile.holiday_start ?? undefined} max={profile.holiday_end ?? undefined} value={form.task_date} onChange={(e) => setForm({ ...form, task_date: e.target.value })} required /></label></div><label>任务说明<textarea value={form.description ?? ""} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="简单说明做到什么程度" maxLength={300} /></label><div className="form-grid three"><label>开始时间<input type="time" value={form.start_time ?? ""} onChange={(e) => setForm({ ...form, start_time: e.target.value || null })} /></label><label>预计用时（分钟）<input type="number" min="1" max="480" value={form.duration_minutes} onChange={(e) => setForm({ ...form, duration_minutes: Number(e.target.value) })} required /></label><label>重复规则<select value={form.repeat_type} disabled={Boolean(task)} onChange={(e) => setForm({ ...form, repeat_type: e.target.value as RepeatType })}>{(["不重复", "每天", "周一至周五", "每周指定日期"] as RepeatType[]).map((repeat) => <option key={repeat}>{repeat}</option>)}</select></label></div>{form.repeat_type === "每周指定日期" && <div className="weekday-picker">{["日", "一", "二", "三", "四", "五", "六"].map((label, day) => <button type="button" key={day} className={form.weekdays?.includes(day) ? "active" : ""} onClick={() => setForm({ ...form, weekdays: form.weekdays?.includes(day) ? form.weekdays.filter((value) => value !== day) : [...(form.weekdays ?? []), day] })}>周{label}</button>)}</div>}<div className="form-grid three"><label>完成奖励星星<input type="number" min="0" max="999" value={form.star_reward} onChange={(e) => setForm({ ...form, star_reward: Number(e.target.value) })} /></label><label>未完成扣除星星<input type="number" min="0" max="999" value={form.star_penalty} onChange={(e) => setForm({ ...form, star_penalty: Number(e.target.value) })} /></label><label>游戏奖励（分钟）<input type="number" min="0" max="300" value={form.game_minutes_reward} onChange={(e) => setForm({ ...form, game_minutes_reward: Number(e.target.value) })} /></label></div><div className="check-grid"><label className="check-line"><input type="checkbox" checked={form.require_parent_approval} onChange={(e) => setForm({ ...form, require_parent_approval: e.target.checked })} />需要家长确认</label><label className="check-line"><input type="checkbox" checked={form.is_required} onChange={(e) => setForm({ ...form, is_required: e.target.checked })} />设为必做任务</label></div>{!task && form.repeat_type !== "不重复" && <div className="info-banner compact">重复任务会创建到假期结束日，最长生成 60 天，可随时停用或删除。</div>}<button className="primary-button wide">{task ? "保存修改" : "创建任务"}</button></form>;
+}
+
+function ApprovalForm({ task, onSubmit }: { task: GrowthTask; onSubmit: (awardedStars: number, reason: string) => void }) {
+  const [awardedStars, setAwardedStars] = useState(task.star_reward);
+  const [reason, setReason] = useState("");
+  const adjusted = awardedStars < task.star_reward;
+  const validAmount = Number.isInteger(awardedStars) && awardedStars >= 0 && awardedStars <= task.star_reward;
+  const withheldStars = validAmount ? task.star_reward - awardedStars : 0;
+  const validReason = !adjusted || reason.trim().length >= 2;
+  return <form className="modal-form" onSubmit={(e) => { e.preventDefault(); if (validAmount && validReason) onSubmit(awardedStars, reason.trim()); }}><p className="form-intro">任务“{task.title}”原定奖励 {task.star_reward} 颗星星。请根据实际完成质量确认本次发放数量。</p><label>实际奖励星星<input type="number" inputMode="numeric" min="0" max={task.star_reward} step="1" value={awardedStars} onChange={(e) => setAwardedStars(Number(e.target.value))} autoFocus required /></label><div className={cn("approval-summary", adjusted && "adjusted")}><span>原定 <strong>{task.star_reward}</strong> 颗</span><span>本次少发 <strong>{withheldStars}</strong> 颗</span><span>实际发放 <strong>{validAmount ? awardedStars : "—"}</strong> 颗</span></div>{adjusted && <label>调整原因<textarea value={reason} onChange={(e) => setReason(e.target.value)} required minLength={2} maxLength={200} placeholder="例如：任务完成了，但检查不够认真" /></label>}<div className="info-banner compact">这里只减少本次任务奖励，不会再次扣除孩子已有的星星；游戏时间仍按任务原设置发放。</div><button className="primary-button wide" disabled={!validAmount || !validReason}>确认并发放 {validAmount ? awardedStars : 0} 颗星星</button></form>;
 }
 
 function PenaltyForm({ task, balance, onSubmit }: { task: GrowthTask; balance: number; onSubmit: (result: "未完成" | "未达标", reason: string) => void }) {
